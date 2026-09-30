@@ -2,8 +2,11 @@ name: News Bot Scheduler
 
 on:
   schedule:
-    - cron: '*/30 * * * *' # هر ۳۰ دقیقه اجرا می‌شود
-  workflow_dispatch:      # امکان اجرای دستی هم فراهم شد
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write  # این خط حیاتیه تا اجازه Push داشته باشه
 
 jobs:
   run-bot:
@@ -11,6 +14,8 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -25,3 +30,10 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+
+      - name: Commit and push changes
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add db.json
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update db.json [skip ci]" && git push)
