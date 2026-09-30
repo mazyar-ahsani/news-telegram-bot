@@ -17,22 +17,29 @@ const SOURCES = [
     { name: 'Deadline', url: 'https://deadline.com/feed/' }
 ];
 
-// منطق اختصاصی برای هر منبع
 function getSourceData(item, sourceName) {
     let image = '';
-    let description = (item.contentSnippet || item.summary || '').replace(/<[^>]*>?/gm, '').substring(0, 200) + '...';
-
-    switch (sourceName) {
-        case 'IGN':
-            image = item.enclosure?.url || (item.media && item.media[0]?.$.url) || '';
-            break;
-        case 'GameSpot':
-            image = (item.media && item.media[0]?.$.url) || item.enclosure?.url || '';
-            break;
-        case 'Deadline':
-            image = item.enclosure?.url || '';
-            break;
+    
+    // ۱. استخراج عکس با اولویت‌بندی (بسیار قوی‌تر)
+    // اول: media:content (استاندارد رسانه‌ای)
+    // دوم: enclosure (استاندارد RSS)
+    // سوم: search in content (اگر در تگ media نبود، در محتوا دنبال تگ <img> می‌گردد)
+    
+    const mediaUrl = item.media?.$.url || item.enclosure?.url;
+    
+    if (mediaUrl) {
+        image = mediaUrl;
+    } else if (item.content || item.summary) {
+        const content = item.content || item.summary;
+        const imgMatch = content.match(/<img[^>]+src="([^">]+)"/);
+        if (imgMatch && imgMatch[1]) {
+            image = imgMatch[1];
+        }
     }
+
+    // پاکسازی توضیحات
+    let description = (item.contentSnippet || item.summary || '').replace(/<[^>]*>?/gm, '').substring(0, 200) + '...';
+    
     return { image, description };
 }
 
