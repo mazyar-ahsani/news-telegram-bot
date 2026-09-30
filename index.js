@@ -2,45 +2,60 @@ const TelegramBot = require('node-telegram-bot-api');
 const Parser = require('rss-parser');
 const fs = require('fs');
 
-const parser = new Parser();
+// تنظیمات اولیه
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN);
 const CHANNEL_ID = process.env.TELEGRAM_CHANNEL_ID;
 const DB_FILE = 'db.json';
 
-// لیست منابع خبری شما
-const FEEDS = [
-    'https://feeds.feedburner.com/IGNAllArticles',
-    'https://www.gamespot.com/feeds/news/',
-    'https://deadline.com/feed/'
+const parser = new Parser({
+    customFields: { item: [['media:content', 'media']] }
+});
+
+// لیست منابع با نام اختصاصی
+const SOURCES = [
+    { name: 'IGN', url: 'https://feeds.feedburner.com/IGNAllArticles' },
+    { name: 'GameSpot', url: 'https://www.gamespot.com/feeds/news/' },
+    { name: 'Deadline', url: 'https://deadline.com/feed/' }
 ];
+
+// منطق اختصاصی برای هر منبع
+function getSourceData(item, sourceName) {
+    let image = '';
+    let description = (item.contentSnippet || item.summary || '').replace(/<[^>]*>?/gm, '').substring(0, 200) + '...';
+
+    switch (sourceName) {
+        case 'IGN':
+            // IGN معمولاً از enclosure یا media:content استفاده می‌کند
+            image = item.enclosure?.url || (item.media && item.media.$?.url) || '';
+            break;
+        case 'GameSpot':
+            // GameSpot معمولاً عکس بزرگ را در media:content دارد
+            image = (item.media && item.media.$?.url) || item.enclosure?.url || '';
+            break;
+        case 'Deadline':
+            // Deadline معمولاً ساختار پیچیده‌تری دارد
+            image = item.enclosure?.url || '';
+            break;
+    }
+    
+    return { image, description };
+}
 
 async function run() {
     let sentItems = [];
-    try {
-        if (fs.existsSync(DB_FILE)) {
-            sentItems = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-        }
-    } catch (e) { console.error("Error reading db:", e); }
+    if (fs.existsSync(DB_FILE)) sentItems = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
 
-    for (const feedUrl of FEEDS) {
+    for (const source of SOURCES) {
         try {
-            const feed = await parser.parseURL(feedUrl);
-            
-            for (const item of feed.items) {
-                const guid = item.guid || item.link;
+            const feed = await parser.parseURL(source.url);
+            console.log(`Checking ${source.name}...`);
 
-                // بررسی تکراری نبودن خبر
+            for (const item of feed.items.slice(0, 3)) { // فقط ۳ خبر جدید
+                const guid = item.guid || item.link;
                 if (sentItems.includes(guid)) continue;
 
-                // استخراج عکس
-                const image = item.enclosure?.url || 
-                              item['media:content']?.$.url || 
-                              item.image?.url || '';
-
-                // تمیزسازی متن (حذف HTML)
-                const description = (item.contentSnippet || item.summary || '').replace(/<[^>]*>?/gm, '').substring(0, 200) + '...';
-
-                const caption = `<b>${item.title}</b>\n\n${description}\n\n🔗 <a href="${item.link}">مشاهده خبر</a>`;
+                const { image, description } = getSourceData(item, source.name);
+                const caption = `<b>${item.title}</b>\n\n${description}\n\n🏷 منبع: ${source.name}\n🔗 <a href="${item.link}">مشاهده خبر</a>`;
 
                 try {
                     if (image) {
@@ -48,20 +63,13 @@ async function run() {
                     } else {
                         await bot.sendMessage(CHANNEL_ID, caption, { parse_mode: 'HTML' });
                     }
-                    console.log(`Sent: ${item.title}`);
                     sentItems.push(guid);
-                } catch (err) {
-                    console.error(`Failed to send: ${item.title}`, err);
-                }
-                
-                // جلوگیری از اسپم (کمی تأخیر بین ارسال)
-                await new Promise(resolve => setTimeout(resolve, 2000));
+                    await new Promise(r => setTimeout(r, 2000));
+                } catch (err) { console.error(`Error sending ${source.name}:`, err.message); }
             }
-        } catch (err) { console.error(`Error parsing feed ${feedUrl}:`, err); }
+        } catch (err) { console.error(`Error fetching ${source.name}:`, err.message); }
     }
-
-    // ذخیره دیتابیس جدید
-    fs.writeFileSync(DB_FILE, JSON.stringify(sentItems, null, 2));
+    fs.writeFileSync(DB_FILE, JSON.stringify(sentItems.slice(-100), null, 2));
 }
 
 run();
