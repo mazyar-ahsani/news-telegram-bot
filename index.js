@@ -7,37 +7,33 @@ import fs from 'fs';
 // CONFIG
 // ==========================================
 
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN);
+
 const CHANNEL_ID = process.env.TELEGRAM_CHANNEL_ID;
+
+const RSS_URL = 'https://blog.playstation.com/feed/';
 
 const DB_FILE = './db.json';
 
-// فقط PlayStation Blog
-const RSS_URL = 'https://blog.playstation.com/feed/';
-
-// تعداد خبرهایی که در هر اجرا بررسی می‌شوند
 const MAX_POSTS = 5;
 
-// فاصله بین ارسال پیام‌ها
 const SEND_DELAY = 2000;
 
 // ==========================================
 // CHECK CONFIG
 // ==========================================
 
-if (!TELEGRAM_BOT_TOKEN) {
-    throw new Error('TELEGRAM_BOT_TOKEN is not set.');
+if (!process.env.TELEGRAM_BOT_TOKEN) {
+    throw new Error('TELEGRAM_BOT_TOKEN is missing');
 }
 
 if (!CHANNEL_ID) {
-    throw new Error('TELEGRAM_CHANNEL_ID is not set.');
+    throw new Error('TELEGRAM_CHANNEL_ID is missing');
 }
 
 // ==========================================
-// INSTANCES
+// RSS PARSER
 // ==========================================
-
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN);
 
 const parser = new Parser({
     timeout: 30000,
@@ -51,7 +47,7 @@ const parser = new Parser({
 // HELPERS
 // ==========================================
 
-function delay(ms) {
+function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
@@ -61,25 +57,27 @@ function loadDatabase() {
     }
 
     try {
-        const data = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+        const data = JSON.parse(
+            fs.readFileSync(DB_FILE, 'utf8')
+        );
 
         return Array.isArray(data) ? data : [];
-    } catch (error) {
-        console.error('خطا در خواندن db.json:', error.message);
+
+    } catch {
         return [];
     }
 }
 
-function saveDatabase(sentItems) {
+function saveDatabase(items) {
     fs.writeFileSync(
         DB_FILE,
-        JSON.stringify(sentItems.slice(-500), null, 2),
+        JSON.stringify(items.slice(-500), null, 2),
         'utf8'
     );
 }
 
 function cleanText(text) {
-    return text
+    return String(text || '')
         .replace(/\u00a0/g, ' ')
         .replace(/\r/g, '')
         .replace(/[ \t]+/g, ' ')
@@ -88,6 +86,7 @@ function cleanText(text) {
 }
 
 function absoluteUrl(url, baseUrl) {
+
     if (!url) {
         return '';
     }
@@ -99,130 +98,279 @@ function absoluteUrl(url, baseUrl) {
     }
 }
 
+function escapeHtml(text) {
+
+    return String(text || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
 // ==========================================
-// GET FEATURED IMAGE
+// IMAGE URL
 // ==========================================
 
-function getFeaturedImage($, articleUrl) {
-    // 1. Open Graph
-    const ogImage = $('meta[property="og:image"]').attr('content');
+function getImageUrl($, articleUrl) {
 
-    if (ogImage) {
-        return absoluteUrl(ogImage, articleUrl);
+    // --------------------------------------
+    // 1. og:image
+    // --------------------------------------
+
+    let image =
+        $('meta[property="og:image"]')
+            .attr('content');
+
+    if (image) {
+        return absoluteUrl(image, articleUrl);
     }
 
-    // 2. Twitter image
-    const twitterImage = $('meta[name="twitter:image"]').attr('content');
+    // --------------------------------------
+    // 2. twitter:image
+    // --------------------------------------
 
-    if (twitterImage) {
-        return absoluteUrl(twitterImage, articleUrl);
+    image =
+        $('meta[name="twitter:image"]')
+            .attr('content');
+
+    if (image) {
+        return absoluteUrl(image, articleUrl);
     }
 
+    // --------------------------------------
     // 3. JSON-LD
-    let jsonLdImage = '';
+    // --------------------------------------
 
-    $('script[type="application/ld+json"]').each((_, element) => {
-        if (jsonLdImage) {
-            return;
-        }
+    let jsonImage = '';
 
-        try {
-            const raw = $(element).contents().text();
-            const data = JSON.parse(raw);
+    $('script[type="application/ld+json"]').each(
+        (_, element) => {
 
-            const findImage = obj => {
-                if (!obj) {
+            if (jsonImage) {
+                return;
+            }
+
+            try {
+
+                const raw = $(element)
+                    .contents()
+                    .text();
+
+                const data = JSON.parse(raw);
+
+                const findImage = object => {
+
+                    if (!object) {
+                        return '';
+                    }
+
+                    if (typeof object === 'string') {
+                        return '';
+                    }
+
+                    if (Array.isArray(object)) {
+
+                        for (const item of object) {
+
+                            const result =
+                                findImage(item);
+
+                            if (result) {
+                                return result;
+                            }
+                        }
+
+                        return '';
+                    }
+
+                    if (typeof object === 'object') {
+
+                        if (object.image) {
+
+                            if (
+                                typeof object.image ===
+                                'string'
+                            ) {
+                                return object.image;
+                            }
+
+                            if (
+                                Array.isArray(object.image)
+                                &&
+                                object.image.length
+                            ) {
+                                return object.image[0];
+                            }
+
+                            if (
+                                typeof object.image ===
+                                'object'
+                            ) {
+                                return object.image.url || '';
+                            }
+                        }
+
+                        for (
+                            const value
+                            of Object.values(object)
+                        ) {
+
+                            const result =
+                                findImage(value);
+
+                            if (result) {
+                                return result;
+                            }
+                        }
+                    }
+
                     return '';
-                }
+                };
 
-                if (typeof obj === 'string') {
-                    return '';
-                }
+                jsonImage = findImage(data);
 
-                if (Array.isArray(obj)) {
-                    for (const item of obj) {
-                        const result = findImage(item);
-
-                        if (result) {
-                            return result;
-                        }
-                    }
-                }
-
-                if (typeof obj === 'object') {
-                    if (obj.image) {
-                        if (typeof obj.image === 'string') {
-                            return obj.image;
-                        }
-
-                        if (Array.isArray(obj.image) && obj.image.length) {
-                            return obj.image[0];
-                        }
-
-                        if (typeof obj.image === 'object') {
-                            return obj.image.url || '';
-                        }
-                    }
-
-                    for (const value of Object.values(obj)) {
-                        const result = findImage(value);
-
-                        if (result) {
-                            return result;
-                        }
-                    }
-                }
-
-                return '';
-            };
-
-            jsonLdImage = findImage(data);
-        } catch {
-            // JSON-LD ممکن است قابل parse نباشد
+            } catch {
+                // ignore
+            }
         }
-    });
+    );
 
-    if (jsonLdImage) {
-        return absoluteUrl(jsonLdImage, articleUrl);
+    if (jsonImage) {
+        return absoluteUrl(
+            jsonImage,
+            articleUrl
+        );
     }
 
-    // 4. اولین عکس مناسب داخل مقاله
-    const firstImage = $('article img').first().attr('src');
+    // --------------------------------------
+    // 4. اولین عکس مقاله
+    // --------------------------------------
 
-    if (firstImage) {
-        return absoluteUrl(firstImage, articleUrl);
+    const articleImage =
+        $('article img')
+            .first()
+            .attr('src');
+
+    if (articleImage) {
+        return absoluteUrl(
+            articleImage,
+            articleUrl
+        );
+    }
+
+    // --------------------------------------
+    // 5. عکس‌های main
+    // --------------------------------------
+
+    const mainImage =
+        $('main img')
+            .first()
+            .attr('src');
+
+    if (mainImage) {
+        return absoluteUrl(
+            mainImage,
+            articleUrl
+        );
     }
 
     return '';
 }
 
 // ==========================================
-// GET ARTICLE ROOT
+// DOWNLOAD IMAGE
 // ==========================================
 
-function getArticleRoot($) {
-    // اول article اصلی
-    let article = $('main article').first();
+async function downloadImage(imageUrl) {
+
+    if (!imageUrl) {
+        return null;
+    }
+
+    console.log(`در حال دانلود عکس: ${imageUrl}`);
+
+    try {
+
+        const response = await fetch(
+            imageUrl,
+            {
+                headers: {
+                    'User-Agent':
+                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36',
+                    'Accept':
+                        'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+                    'Referer':
+                        'https://blog.playstation.com/'
+                }
+            }
+        );
+
+        if (!response.ok) {
+
+            console.error(
+                `خطای دریافت عکس: HTTP ${response.status}`
+            );
+
+            return null;
+        }
+
+        const contentType =
+            response.headers.get('content-type') || '';
+
+        if (!contentType.startsWith('image/')) {
+
+            console.error(
+                `URL عکس، تصویر برنگرداند: ${contentType}`
+            );
+
+            return null;
+        }
+
+        const arrayBuffer =
+            await response.arrayBuffer();
+
+        return Buffer.from(arrayBuffer);
+
+    } catch (error) {
+
+        console.error(
+            'خطا در دانلود عکس:',
+            error.message
+        );
+
+        return null;
+    }
+}
+
+// ==========================================
+// FIND ARTICLE
+// ==========================================
+
+function getArticle($) {
+
+    let article =
+        $('main article').first();
 
     if (article.length) {
         return article;
     }
 
-    article = $('article').first();
+    article =
+        $('article').first();
 
     if (article.length) {
         return article;
     }
 
-    // fallback
     return $('main').first();
 }
 
 // ==========================================
-// REMOVE UNWANTED CONTENT
+// CLEAN ARTICLE
 // ==========================================
 
-function cleanArticleDom($, article) {
+function cleanArticle($, article) {
+
     article.find(`
         script,
         style,
@@ -251,110 +399,109 @@ function cleanArticleDom($, article) {
         .sidebar
     `).remove();
 
-    // عنوان اصلی را حذف می‌کنیم
     article.find('h1').remove();
 
-    // اطلاعات اضافی مربوط به مقاله
     article.find('.entry-meta').remove();
     article.find('.post-meta').remove();
     article.find('.article-meta').remove();
     article.find('.author-meta').remove();
 
-    // بخش‌های انتهایی سایت
-    article.find('a[href*="/category/"]').remove();
-
-    // لینک‌های خالی
-    article.find('a').each((_, element) => {
-        const text = cleanText($(element).text());
-
-        if (!text) {
-            $(element).remove();
-        }
-    });
-
     return article;
 }
 
 // ==========================================
-// EXTRACT ARTICLE TEXT
+// ARTICLE TEXT
 // ==========================================
 
 function extractArticleText($, article) {
+
     const blocks = [];
 
     article
         .find('h2, h3, h4, h5, p, li, blockquote')
         .each((_, element) => {
 
-            const tag = element.tagName.toLowerCase();
+            const tag =
+                element.tagName.toLowerCase();
 
-            let text = cleanText($(element).text());
+            let text =
+                cleanText($(element).text());
 
             if (!text) {
                 return;
             }
 
-            // حذف متن‌های خیلی کوتاه و غیرمقاله‌ای
             if (
-                text.length < 2 &&
-                !['h2', 'h3', 'h4', 'h5'].includes(tag)
+                tag === 'li'
             ) {
-                return;
-            }
-
-            if (tag.startsWith('h')) {
-                text = `\n${text}\n`;
-            }
-
-            if (tag === 'li') {
                 text = `• ${text}`;
             }
 
-            if (tag === 'blockquote') {
+            if (
+                tag === 'blockquote'
+            ) {
                 text = `“${text}”`;
             }
 
             blocks.push(text);
         });
 
-    return cleanText(blocks.join('\n\n'));
+    return cleanText(
+        blocks.join('\n\n')
+    );
 }
 
 // ==========================================
-// EXTRACT ARTICLE DATA
+// FETCH ARTICLE
 // ==========================================
 
 async function fetchArticle(url) {
-    console.log(`در حال دریافت مقاله: ${url}`);
 
-    const response = await fetch(url, {
-        headers: {
-            'User-Agent':
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36',
-            'Accept':
-                'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9'
+    console.log('');
+    console.log(
+        `دریافت مقاله: ${url}`
+    );
+
+    const response = await fetch(
+        url,
+        {
+            headers: {
+                'User-Agent':
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36',
+                'Accept':
+                    'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language':
+                    'en-US,en;q=0.9'
+            }
         }
-    });
+    );
 
     if (!response.ok) {
+
         throw new Error(
-            `HTTP ${response.status} while fetching article`
+            `HTTP ${response.status}`
         );
     }
 
-    const html = await response.text();
+    const html =
+        await response.text();
 
-    const $ = cheerio.load(html);
+    const $ =
+        cheerio.load(html);
 
     // ======================================
     // TITLE
     // ======================================
 
     const title =
-        cleanText($('h1').first().text()) ||
-        cleanText($('meta[property="og:title"]').attr('content')) ||
-        'Untitled';
+        cleanText(
+            $('h1').first().text()
+        ) ||
+        cleanText(
+            $('meta[property="og:title"]')
+                .attr('content')
+        ) ||
+        'PlayStation News';
 
     // ======================================
     // DESCRIPTION
@@ -362,73 +509,82 @@ async function fetchArticle(url) {
 
     const description =
         cleanText(
-            $('meta[property="og:description"]').attr('content')
+            $('meta[property="og:description"]')
+                .attr('content')
         ) ||
         cleanText(
-            $('meta[name="description"]').attr('content')
-        ) ||
-        cleanText($('article p').first().text());
+            $('meta[name="description"]')
+                .attr('content')
+        );
 
     // ======================================
     // AUTHOR
     // ======================================
 
-    let author =
+    const author =
         cleanText(
-            $('meta[name="author"]').attr('content')
+            $('meta[name="author"]')
+                .attr('content')
+        ) ||
+        cleanText(
+            $('[rel="author"]')
+                .first()
+                .text()
         );
-
-    if (!author) {
-        author = cleanText(
-            $('[rel="author"]').first().text()
-        );
-    }
-
-    if (!author) {
-        author = cleanText(
-            $('.author').first().text()
-        );
-    }
 
     // ======================================
     // DATE
     // ======================================
 
-    let publishedAt =
-        $('meta[property="article:published_time"]').attr('content');
+    const publishedAt =
+        $('meta[property="article:published_time"]')
+            .attr('content') ||
+        $('time[datetime]')
+            .first()
+            .attr('datetime') ||
+        '';
 
-    if (!publishedAt) {
-        publishedAt =
-            $('time[datetime]').first().attr('datetime');
+    // ======================================
+    // IMAGE
+    // ======================================
+
+    const image =
+        getImageUrl($, url);
+
+    console.log(
+        `عکس: ${image || 'پیدا نشد'}`
+    );
+
+    // ======================================
+    // CONTENT
+    // ======================================
+
+    const article =
+        getArticle($);
+
+    if (!article.length) {
+
+        throw new Error(
+            'Article container not found'
+        );
     }
 
-    if (!publishedAt) {
-        publishedAt =
-            $('time').first().text();
-    }
+    cleanArticle(
+        $,
+        article
+    );
 
-    // ======================================
-    // FEATURED IMAGE
-    // ======================================
-
-    const image = getFeaturedImage($, url);
-
-    // ======================================
-    // ARTICLE BODY
-    // ======================================
-
-    const article = getArticleRoot($);
-
-    if (!article || !article.length) {
-        throw new Error('Article container not found.');
-    }
-
-    cleanArticleDom($, article);
-
-    const content = extractArticleText($, article);
+    const content =
+        extractArticleText(
+            $,
+            article
+        );
 
     if (!content) {
-        throw new Error('Article content is empty.');
+
+        throw new Error(
+            'Article content is empty'
+        );
     }
 
     return {
@@ -443,23 +599,45 @@ async function fetchArticle(url) {
 }
 
 // ==========================================
-// TELEGRAM MESSAGE SPLITTER
+// SPLIT TELEGRAM MESSAGE
 // ==========================================
 
-function splitMessage(text, maxLength = 3900) {
+function splitMessage(
+    text,
+    maxLength = 3900
+) {
+
     const messages = [];
 
-    let remaining = text.trim();
+    let remaining =
+        text.trim();
 
-    while (remaining.length > maxLength) {
-        let splitAt = remaining.lastIndexOf('\n\n', maxLength);
+    while (
+        remaining.length > maxLength
+    ) {
+
+        let splitAt =
+            remaining.lastIndexOf(
+                '\n\n',
+                maxLength
+            );
 
         if (splitAt < 1000) {
-            splitAt = remaining.lastIndexOf('\n', maxLength);
+
+            splitAt =
+                remaining.lastIndexOf(
+                    '\n',
+                    maxLength
+                );
         }
 
         if (splitAt < 1000) {
-            splitAt = remaining.lastIndexOf(' ', maxLength);
+
+            splitAt =
+                remaining.lastIndexOf(
+                    ' ',
+                    maxLength
+                );
         }
 
         if (splitAt < 1000) {
@@ -467,10 +645,15 @@ function splitMessage(text, maxLength = 3900) {
         }
 
         messages.push(
-            remaining.slice(0, splitAt).trim()
+            remaining
+                .slice(0, splitAt)
+                .trim()
         );
 
-        remaining = remaining.slice(splitAt).trim();
+        remaining =
+            remaining
+                .slice(splitAt)
+                .trim();
     }
 
     if (remaining) {
@@ -481,103 +664,108 @@ function splitMessage(text, maxLength = 3900) {
 }
 
 // ==========================================
-// TELEGRAM HEADER
-// ==========================================
-
-function createHeader(article) {
-    let header = `<b>${escapeHtml(article.title)}</b>\n\n`;
-
-    if (article.description) {
-        header += `${escapeHtml(article.description)}\n\n`;
-    }
-
-    if (article.author) {
-        header += `✍️ ${escapeHtml(article.author)}\n`;
-    }
-
-    if (article.publishedAt) {
-        header += `📅 ${escapeHtml(String(article.publishedAt))}\n`;
-    }
-
-    header += `\n🔗 <a href="${escapeHtml(article.url)}">مشاهده خبر در PlayStation Blog</a>`;
-
-    return header;
-}
-
-// ==========================================
-// HTML ESCAPE
-// ==========================================
-
-function escapeHtml(text) {
-    return String(text)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
-}
-
-// ==========================================
 // SEND ARTICLE
 // ==========================================
 
 async function sendArticle(article) {
 
-    const header = createHeader(article);
+    let caption =
+        `<b>${escapeHtml(article.title)}</b>\n\n`;
 
-    // --------------------------------------
-    // 1. عکس + عنوان
-    // --------------------------------------
+    if (article.description) {
 
-    if (article.image) {
+        caption +=
+            `${escapeHtml(article.description)}\n\n`;
+    }
+
+    if (article.author) {
+
+        caption +=
+            `✍️ ${escapeHtml(article.author)}\n`;
+    }
+
+    caption +=
+        `\n🔗 <a href="${escapeHtml(article.url)}">منبع: PlayStation Blog</a>`;
+
+    // ======================================
+    // DOWNLOAD IMAGE
+    // ======================================
+
+    const imageBuffer =
+        await downloadImage(
+            article.image
+        );
+
+    // ======================================
+    // SEND IMAGE
+    // ======================================
+
+    if (imageBuffer) {
+
         try {
+
             await bot.sendPhoto(
                 CHANNEL_ID,
-                article.image,
+                imageBuffer,
                 {
-                    caption: header,
+                    caption,
                     parse_mode: 'HTML'
                 }
             );
+
+            console.log(
+                '✓ عکس ارسال شد'
+            );
+
         } catch (error) {
+
             console.error(
-                'ارسال عکس ناموفق بود:',
+                'خطا در ارسال عکس:',
                 error.message
             );
 
-            // اگر عکس مشکل داشت، حداقل header ارسال شود
             await bot.sendMessage(
                 CHANNEL_ID,
-                header,
+                caption,
                 {
-                    parse_mode: 'HTML',
-                    disable_web_page_preview: false
+                    parse_mode: 'HTML'
                 }
             );
         }
+
     } else {
+
         await bot.sendMessage(
             CHANNEL_ID,
-            header,
+            caption,
             {
-                parse_mode: 'HTML',
-                disable_web_page_preview: false
+                parse_mode: 'HTML'
             }
         );
     }
 
-    await delay(SEND_DELAY);
-
-    // --------------------------------------
-    // 2. متن کامل مقاله
-    // --------------------------------------
-
-    const messages = splitMessage(article.content);
-
-    console.log(
-        `تعداد بخش‌های مقاله: ${messages.length}`
+    await sleep(
+        SEND_DELAY
     );
 
-    for (const message of messages) {
+    // ======================================
+    // SEND FULL ARTICLE
+    // ======================================
+
+    const messages =
+        splitMessage(
+            article.content
+        );
+
+    console.log(
+        `تعداد پیام‌های متن: ${messages.length}`
+    );
+
+    for (
+        const message
+        of messages
+    ) {
+
         await bot.sendMessage(
             CHANNEL_ID,
             message,
@@ -586,7 +774,9 @@ async function sendArticle(article) {
             }
         );
 
-        await delay(SEND_DELAY);
+        await sleep(
+            SEND_DELAY
+        );
     }
 }
 
@@ -596,122 +786,167 @@ async function sendArticle(article) {
 
 async function run() {
 
-    console.log('======================================');
-    console.log('PlayStation Blog News Bot');
-    console.log('======================================');
-
-    const sentItems = loadDatabase();
-
+    console.log('');
     console.log(
-        `تعداد اخبار ثبت شده: ${sentItems.length}`
+        '======================================'
+    );
+    console.log(
+        'PLAYSTATION BLOG NEWS BOT'
+    );
+    console.log(
+        '======================================'
     );
 
-    try {
+    const sentItems =
+        loadDatabase();
 
-        // ----------------------------------
-        // دریافت RSS
-        // ----------------------------------
+    console.log(
+        `اخبار ثبت شده: ${sentItems.length}`
+    );
 
-        console.log('در حال دریافت RSS...');
+    // ======================================
+    // RSS
+    // ======================================
 
-        const feed = await parser.parseURL(RSS_URL);
+    console.log(
+        'دریافت PlayStation Blog RSS...'
+    );
 
-        console.log(
-            `تعداد اخبار RSS: ${feed.items.length}`
+    const feed =
+        await parser.parseURL(
+            RSS_URL
         );
 
-        // ----------------------------------
-        // آخرین اخبار
-        // ----------------------------------
+    console.log(
+        `اخبار موجود در RSS: ${feed.items.length}`
+    );
 
-        const posts = feed.items.slice(0, MAX_POSTS);
+    // ======================================
+    // PROCESS NEWS
+    // ======================================
 
-        for (const item of posts) {
+    const posts =
+        feed.items.slice(
+            0,
+            MAX_POSTS
+        );
 
-            const guid =
-                item.guid ||
-                item.id ||
-                item.link;
+    for (
+        const item
+        of posts
+    ) {
 
-            const articleUrl = item.link;
+        const guid =
+            item.guid ||
+            item.id ||
+            item.link;
 
-            if (!guid || !articleUrl) {
-                continue;
-            }
+        const articleUrl =
+            item.link;
 
-            // قبلاً ارسال شده
-            if (sentItems.includes(guid)) {
-                console.log(
-                    `قبلاً ارسال شده: ${item.title}`
-                );
-
-                continue;
-            }
-
-            console.log('');
-            console.log('--------------------------------------');
-            console.log(`خبر جدید: ${item.title}`);
-            console.log(`URL: ${articleUrl}`);
-            console.log('--------------------------------------');
-
-            try {
-
-                // دریافت صفحه کامل خبر
-                const article =
-                    await fetchArticle(articleUrl);
-
-                console.log(
-                    `عنوان: ${article.title}`
-                );
-
-                console.log(
-                    `حجم متن: ${article.content.length} کاراکتر`
-                );
-
-                // ارسال کامل به تلگرام
-                await sendArticle(article);
-
-                // ثبت در دیتابیس
-                sentItems.push(guid);
-
-                saveDatabase(sentItems);
-
-                console.log(
-                    `✓ ارسال شد: ${article.title}`
-                );
-
-                await delay(SEND_DELAY);
-
-            } catch (error) {
-
-                console.error(
-                    `✗ خطا در پردازش خبر "${item.title}":`,
-                    error.message
-                );
-            }
+        if (
+            !guid ||
+            !articleUrl
+        ) {
+            continue;
         }
 
-    } catch (error) {
+        // ==================================
+        // DUPLICATE
+        // ==================================
 
-        console.error(
-            'خطا در دریافت PlayStation Blog RSS:',
-            error.message
+        if (
+            sentItems.includes(guid)
+        ) {
+
+            console.log(
+                `قبلاً ارسال شده: ${item.title}`
+            );
+
+            continue;
+        }
+
+        console.log('');
+        console.log(
+            '--------------------------------------'
         );
+
+        console.log(
+            `خبر جدید: ${item.title}`
+        );
+
+        try {
+
+            // دریافت صفحه کامل
+            const article =
+                await fetchArticle(
+                    articleUrl
+                );
+
+            console.log(
+                `عنوان: ${article.title}`
+            );
+
+            console.log(
+                `طول متن: ${article.content.length}`
+            );
+
+            // ارسال
+            await sendArticle(
+                article
+            );
+
+            // ثبت
+            sentItems.push(
+                guid
+            );
+
+            saveDatabase(
+                sentItems
+            );
+
+            console.log(
+                `✓ خبر ارسال شد: ${article.title}`
+            );
+
+            await sleep(
+                SEND_DELAY
+            );
+
+        } catch (error) {
+
+            console.error(
+                `✗ خطا: ${error.message}`
+            );
+        }
     }
 
-    saveDatabase(sentItems);
+    saveDatabase(
+        sentItems
+    );
 
     console.log('');
-    console.log('======================================');
-    console.log('پایان اجرای ربات');
-    console.log('======================================');
+    console.log(
+        '======================================'
+    );
+    console.log(
+        'BOT FINISHED'
+    );
+    console.log(
+        '======================================'
+    );
 }
 
 // ==========================================
-// RUN
+// START
 // ==========================================
 
 run().catch(error => {
-    console.error('Fatal error:', error);
+
+    console.error(
+        'Fatal Error:',
+        error
+    );
+
     process.exit(1);
 });
