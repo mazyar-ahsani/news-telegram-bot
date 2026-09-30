@@ -1,8 +1,8 @@
-const TelegramBot = require('node-telegram-bot-api');
-const Parser = require('rss-parser');
-const fs = require('fs');
+import TelegramBot from 'node-telegram-bot-api';
+import Parser from 'rss-parser';
+import fs from 'fs';
 
-// تنظیمات اولیه
+// تنظیمات ربات
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN);
 const CHANNEL_ID = process.env.TELEGRAM_CHANNEL_ID;
 const DB_FILE = 'db.json';
@@ -11,7 +11,6 @@ const parser = new Parser({
     customFields: { item: [['media:content', 'media']] }
 });
 
-// لیست منابع با نام اختصاصی
 const SOURCES = [
     { name: 'IGN', url: 'https://feeds.feedburner.com/IGNAllArticles' },
     { name: 'GameSpot', url: 'https://www.gamespot.com/feeds/news/' },
@@ -25,32 +24,30 @@ function getSourceData(item, sourceName) {
 
     switch (sourceName) {
         case 'IGN':
-            // IGN معمولاً از enclosure یا media:content استفاده می‌کند
-            image = item.enclosure?.url || (item.media && item.media.$?.url) || '';
+            image = item.enclosure?.url || (item.media && item.media[0]?.$.url) || '';
             break;
         case 'GameSpot':
-            // GameSpot معمولاً عکس بزرگ را در media:content دارد
-            image = (item.media && item.media.$?.url) || item.enclosure?.url || '';
+            image = (item.media && item.media[0]?.$.url) || item.enclosure?.url || '';
             break;
         case 'Deadline':
-            // Deadline معمولاً ساختار پیچیده‌تری دارد
             image = item.enclosure?.url || '';
             break;
     }
-    
     return { image, description };
 }
 
 async function run() {
     let sentItems = [];
-    if (fs.existsSync(DB_FILE)) sentItems = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+    if (fs.existsSync(DB_FILE)) {
+        sentItems = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+    }
 
     for (const source of SOURCES) {
         try {
             const feed = await parser.parseURL(source.url);
-            console.log(`Checking ${source.name}...`);
-
-            for (const item of feed.items.slice(0, 3)) { // فقط ۳ خبر جدید
+            
+            // پردازش ۳ خبر آخر هر منبع
+            for (const item of feed.items.slice(0, 3)) {
                 const guid = item.guid || item.link;
                 if (sentItems.includes(guid)) continue;
 
@@ -64,11 +61,13 @@ async function run() {
                         await bot.sendMessage(CHANNEL_ID, caption, { parse_mode: 'HTML' });
                     }
                     sentItems.push(guid);
+                    // تأخیر ۲ ثانیه‌ای برای جلوگیری از بن شدن توسط تلگرام
                     await new Promise(r => setTimeout(r, 2000));
-                } catch (err) { console.error(`Error sending ${source.name}:`, err.message); }
+                } catch (err) { console.error(`خطا در ارسال ${source.name}:`, err.message); }
             }
-        } catch (err) { console.error(`Error fetching ${source.name}:`, err.message); }
+        } catch (err) { console.error(`خطا در خواندن ${source.name}:`, err.message); }
     }
+    
     fs.writeFileSync(DB_FILE, JSON.stringify(sentItems.slice(-100), null, 2));
 }
 
