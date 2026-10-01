@@ -5,11 +5,13 @@ on:
     - cron: '*/30 * * * *' # اجرای خودکار هر ۳۰ دقیقه
   workflow_dispatch:      # امکان اجرای دستی از تب Actions
 
+# اعمال دسترسی کامل برای ثبت و پوش کردن دیتابیس
+permissions:
+  contents: write
+
 jobs:
   run-bot:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write # برای اجازه تغییر در ریپازیتوری
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -19,7 +21,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 24
 
       - name: Install dependencies
         run: npm install
@@ -35,5 +37,4 @@ jobs:
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           git add db.json
-          # بررسی اینکه آیا تغییری در db.json ایجاد شده یا خیر
           git diff --quiet && git diff --staged --quiet || (git commit -m "Update db.json [skip ci]" && git push)
