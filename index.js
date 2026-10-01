@@ -1,4 +1,5 @@
 import TelegramBot from 'node-telegram-bot-api';
+import * as cheerio from 'cheerio';
 import fs from 'fs';
 
 // ==========================================
@@ -9,11 +10,11 @@ const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
 const CHANNEL_ID = process.env.TELEGRAM_CHANNEL_ID || process.env.CHANNEL_ID;
 
 if (!BOT_TOKEN) {
-    throw new Error('Bot token is GAPGPTMASKTOKEN5dae9p68s6vX0X in environment variables');
+    throw new Error('Bot token is missing in environment variables');
 }
 
 if (!CHANNEL_ID) {
-    throw new Error('Channel ID is GAPGPTMASKTOKEN5dae9p68s6vX1X in environment variables');
+    throw new Error('Channel ID is missing in environment variables');
 }
 
 const bot = new TelegramBot(BOT_TOKEN);
@@ -30,7 +31,7 @@ const SOURCES = [
 ];
 
 const DB_FILE = './db.json';
-const MAX_POSTS_PER_FEED = 3;
+const MAX_POSTS_PER_FEED = 2; // برای جلوگیری از شلوغی و طولانی شدن اجرای گیت‌هاب
 const SEND_DELAY = 2500;
 
 // ==========================================
@@ -58,7 +59,6 @@ function saveDatabase(items) {
 function cleanText(text) {
     return String(text || '')
         .replace(/\u00a0/g, ' ')
-        .replace(/<[^>]*>/g, '') // حذف تگ‌های HTML باقی‌مانده
         .replace(/\r/g, '')
         .replace(/[ \t]+/g, ' ')
         .replace(/\n{3,}/g, '\n\n')
@@ -74,18 +74,15 @@ function escapeHtml(text) {
 }
 
 function extractImageUrl(item) {
-    // 1. بررسی فیلد مستقیم image
     if (item.image && typeof item.image === 'string' && item.image.startsWith('http')) {
         return item.image;
     }
 
-    // 2. بررسی attachments
     if (Array.isArray(item.attachments) && item.attachments.length > 0) {
         const attach = item.attachments.find(a => a.mime_type?.startsWith('image/') || a.url?.match(/\.(jpg|jpeg|png|webp|gif)/i));
         if (attach?.url) return attach.url;
     }
 
-    // 3. استخراج از تگ img داخل content_html (فرمت رایج rss.app)
     if (item.content_html) {
         const match = item.content_html.match(/<img[^>]+src=["'](https?:\/\/[^"']+)["']/i);
         if (match && match[1]) {
@@ -97,53 +94,130 @@ function extractImageUrl(item) {
 }
 
 // ==========================================
+// SCRAPE FULL ARTICLE TEXT
+// ==========================================
+
+async function fetchFullArticleText(url) {
+    try {
+        const res = await fetch(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+            }
+        });
+
+        if (!res.ok) return '';
+
+        const html = await res.text();
+        const $ = cheerio.load(html);
+
+        // پاکسازی تگ‌های اضافه
+        $('script, style, noscript, iframe, svg, nav, aside, footer, form, button, .comments, .related-posts, .share, .advertisement, .ads, .sidebar').remove();
+
+        let container = $('article').first();
+        if (!container.length) container = $('main').first();
+        if (!container.length) container = $('.post-content, .entry-content, .article-content').first();
+        if (!container.length) container = $('body');
+
+        const blocks = [];
+        container.find('h2, h3, p, li, blockquote').each((_, el) => {
+            const tag = el.tagName.toLowerCase();
+            let text = cleanText($(el).text());
+            if (!text || text.length < 5) return;
+
+            if (tag === 'li') text = `• ${text}`;
+            if (tag === 'blockquote') text = `“${text}”`;
+
+            blocks.push(text);
+        });
+
+        return cleanText(blocks.join('\n\n'));
+    } catch {
+        return '';
+    }
+}
+
+// تقسیم پیام‌های بزرگ تلگرام (محدودیت ۴۰۹۶ کاراکتر)
+function splitMessage(text, maxLength = 3800) {
+    const messages = [];
+    let remaining = text.trim();
+
+    while (remaining.length > maxLength) {
+        let splitAt = remaining.lastIndexOf('\n\n', maxLength);
+        if (splitAt < 1000) splitAt = remaining.lastIndexOf('\n', maxLength);
+        if (splitAt < 1000) splitAt = remaining.lastIndexOf(' ', maxLength);
+        if (splitAt < 1000) splitAt = maxLength;
+
+        messages.push(remaining.slice(0, splitAt).trim());
+        remaining = remaining.slice(splitAt).trim();
+    }
+
+    if (remaining) messages.push(remaining);
+    return messages;
+}
+
+// ==========================================
 // SEND POST
 // ==========================================
 
 async function sendPost(item, sourceTitle) {
     const title = cleanText(item.title || 'بدون عنوان');
     const link = item.url || '';
-    const rawSummary = item.content_text || item.summary || '';
-    const summary = cleanText(rawSummary.length > 300 ? rawSummary.slice(0, 297) + '...' : rawSummary);
     const author = cleanText(item.authors?.[0]?.name || item.author?.name || '');
     const imageUrl = extractImageUrl(item);
 
-    let caption = `📢 <b>${escapeHtml(title)}</b>\n\n`;
+    // ۱. دریافت متن کامل خبر
+    console.log(`در حال دریافت متن کامل مقاله از: ${link}`);
+    let fullText = await fetchFullArticleText(link);
 
-    if (summary) {
-        caption += `${escapeHtml(summary)}\n\n`;
+    // اگر متن کامل پیدا نشد، از خلاصه فید استفاده کن
+    if (!fullText) {
+        fullText = cleanText(item.content_text || item.summary || '');
     }
 
+    let caption = `📢 <b>${escapeHtml(title)}</b>\n\n`;
     if (author) {
         caption += `✍️ نویسنده: ${escapeHtml(author)}\n`;
     }
-
     caption += `🌐 منبع: <b>${escapeHtml(sourceTitle)}</b>\n`;
     if (link) {
-        caption += `🔗 <a href="${escapeHtml(link)}">مشاهده کامل خبر</a>`;
+        caption += `🔗 <a href="${escapeHtml(link)}">مشاهده لینک منبع</a>`;
     }
 
+    // ارسال کاور خبر (تصویر یا پیام متنی تیتر)
     if (imageUrl) {
-        console.log(`در حال ارسال تصویر: ${imageUrl}`);
         try {
             await bot.sendPhoto(CHANNEL_ID, imageUrl, {
                 caption,
                 parse_mode: 'HTML'
             });
-            console.log(`✓ تصویر و کپشن ارسال شد: ${title}`);
-            return;
+            console.log(`✓ تصویر و تیتر ارسال شد: ${title}`);
         } catch (err) {
-            console.error(`خطا در ارسال مستقیم تصویر: ${err.message}. تلاش برای ارسال پیام متنی...`);
+            console.error(`خطا در ارسال عکس: ${err.message}. ارسال متنی...`);
+            await bot.sendMessage(CHANNEL_ID, caption, { parse_mode: 'HTML' });
         }
     } else {
-        console.log('عکسی برای این خبر یافت نشد.');
+        await bot.sendMessage(CHANNEL_ID, caption, { parse_mode: 'HTML' });
     }
 
-    await bot.sendMessage(CHANNEL_ID, caption, {
-        parse_mode: 'HTML',
-        disable_web_page_preview: false
-    });
-    console.log(`✓ پیام متنی ارسال شد: ${title}`);
+    await sleep(SEND_DELAY);
+
+    // ارسال متن کامل مقاله به صورت پیام‌های تفکیک‌شده
+    if (fullText) {
+        const textParts = splitMessage(fullText);
+        console.log(`تعداد پیام‌های متن خبر: ${textParts.length}`);
+
+        for (const part of textParts) {
+            try {
+                await bot.sendMessage(CHANNEL_ID, part, {
+                    disable_web_page_preview: true
+                });
+                await sleep(1500);
+            } catch (err) {
+                console.error(`خطا در ارسال بخشی از متن: ${err.message}`);
+            }
+        }
+    }
 }
 
 // ==========================================
@@ -152,7 +226,7 @@ async function sendPost(item, sourceTitle) {
 
 async function run() {
     console.log('\n======================================');
-    console.log('MULTI-FEED JSON NEWS BOT RUNNING');
+    console.log('FULL ARTICLE MULTI-FEED BOT RUNNING');
     console.log('======================================');
 
     const sentItems = loadDatabase();
@@ -182,11 +256,7 @@ async function run() {
 
             for (const item of items) {
                 const guid = item.id || item.url;
-                if (!guid) continue;
-
-                if (sentItems.includes(guid)) {
-                    continue;
-                }
+                if (!guid || sentItems.includes(guid)) continue;
 
                 console.log(`\nخبر جدید: ${item.title}`);
                 await sendPost(item, sourceTitle);
