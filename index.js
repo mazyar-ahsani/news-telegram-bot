@@ -1,5 +1,4 @@
 import TelegramBot from 'node-telegram-bot-api';
-import * as cheerio from 'cheerio';
 import fs from 'fs';
 
 // ==========================================
@@ -8,30 +7,19 @@ import fs from 'fs';
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
 const CHANNEL_ID = process.env.TELEGRAM_CHANNEL_ID || process.env.CHANNEL_ID;
+const CHANNEL_USERNAME = '@maz_game_channel';
 
-if (!BOT_TOKEN) {
-    throw new Error('Bot token is missing in environment variables');
-}
-
-if (!CHANNEL_ID) {
-    throw new Error('Channel ID is missing in environment variables');
-}
+if (!BOT_TOKEN) throw new Error('Bot token is GAPGPTMASKTOKENq3xxvtngg8dX0X in environment variables');
+if (!CHANNEL_ID) throw new Error('Channel ID is GAPGPTMASKTOKENq3xxvtngg8dX1X in environment variables');
 
 const bot = new TelegramBot(BOT_TOKEN);
 
 const SOURCES = [
-    'https://rss.app/feeds/v1.1/hJq82RDHPbUAgruU.json',
-    'https://rss.app/feeds/v1.1/4uDnWEncNDKOOHhm.json',
-    'https://rss.app/feeds/v1.1/w0i8qundSwVqzDvf.json',
-    'https://rss.app/feeds/v1.1/wFhpf78OfTkIeVyU.json',
-    'https://rss.app/feeds/v1.1/sof9nJ6lqw3WQMQ6.json',
-    'https://rss.app/feeds/v1.1/WDYZJVQukTWHArwU.json',
-    'https://rss.app/feeds/v1.1/AHEgGj1L3ut2KReu.json',
-    'https://rss.app/feeds/v1.1/3zEGo7487fY2hbjy.json'
+    'https://rss.app/feeds/v1.1/6Hir3ou4lxVVU5sp.json'
 ];
 
 const DB_FILE = './db.json';
-const MAX_POSTS_PER_FEED = 2; // برای جلوگیری از شلوغی و طولانی شدن اجرای گیت‌هاب
+const MAX_POSTS_PER_FEED = 5;
 const SEND_DELAY = 2500;
 
 // ==========================================
@@ -61,7 +49,6 @@ function cleanText(text) {
         .replace(/\u00a0/g, ' ')
         .replace(/\r/g, '')
         .replace(/[ \t]+/g, ' ')
-        .replace(/\n{3,}/g, '\n\n')
         .trim();
 }
 
@@ -71,6 +58,21 @@ function escapeHtml(text) {
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
+}
+
+function formatPublishTime(dateString) {
+    if (!dateString) return '';
+    try {
+        const date = new Date(dateString);
+        return date.toLocaleTimeString('fa-IR', {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            timeZone: 'Asia/Tehran'
+        });
+    } catch {
+        return '';
+    }
 }
 
 function extractImageUrl(item) {
@@ -94,129 +96,40 @@ function extractImageUrl(item) {
 }
 
 // ==========================================
-// SCRAPE FULL ARTICLE TEXT
+// SEND POST (PHOTO + FORMATTED CAPTION)
 // ==========================================
 
-async function fetchFullArticleText(url) {
-    try {
-        const res = await fetch(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-            }
-        });
-
-        if (!res.ok) return '';
-
-        const html = await res.text();
-        const $ = cheerio.load(html);
-
-        // پاکسازی تگ‌های اضافه
-        $('script, style, noscript, iframe, svg, nav, aside, footer, form, button, .comments, .related-posts, .share, .advertisement, .ads, .sidebar').remove();
-
-        let container = $('article').first();
-        if (!container.length) container = $('main').first();
-        if (!container.length) container = $('.post-content, .entry-content, .article-content').first();
-        if (!container.length) container = $('body');
-
-        const blocks = [];
-        container.find('h2, h3, p, li, blockquote').each((_, el) => {
-            const tag = el.tagName.toLowerCase();
-            let text = cleanText($(el).text());
-            if (!text || text.length < 5) return;
-
-            if (tag === 'li') text = `• ${text}`;
-            if (tag === 'blockquote') text = `“${text}”`;
-
-            blocks.push(text);
-        });
-
-        return cleanText(blocks.join('\n\n'));
-    } catch {
-        return '';
-    }
-}
-
-// تقسیم پیام‌های بزرگ تلگرام (محدودیت ۴۰۹۶ کاراکتر)
-function splitMessage(text, maxLength = 3800) {
-    const messages = [];
-    let remaining = text.trim();
-
-    while (remaining.length > maxLength) {
-        let splitAt = remaining.lastIndexOf('\n\n', maxLength);
-        if (splitAt < 1000) splitAt = remaining.lastIndexOf('\n', maxLength);
-        if (splitAt < 1000) splitAt = remaining.lastIndexOf(' ', maxLength);
-        if (splitAt < 1000) splitAt = maxLength;
-
-        messages.push(remaining.slice(0, splitAt).trim());
-        remaining = remaining.slice(splitAt).trim();
-    }
-
-    if (remaining) messages.push(remaining);
-    return messages;
-}
-
-// ==========================================
-// SEND POST
-// ==========================================
-
-async function sendPost(item, sourceTitle) {
+async function sendPost(item) {
     const title = cleanText(item.title || 'بدون عنوان');
-    const link = item.url || '';
-    const author = cleanText(item.authors?.[0]?.name || item.author?.name || '');
     const imageUrl = extractImageUrl(item);
+    const timeStr = formatPublishTime(item.date_published);
 
-    // ۱. دریافت متن کامل خبر
-    console.log(`در حال دریافت متن کامل مقاله از: ${link}`);
-    let fullText = await fetchFullArticleText(link);
-
-    // اگر متن کامل پیدا نشد، از خلاصه فید استفاده کن
-    if (!fullText) {
-        fullText = cleanText(item.content_text || item.summary || '');
+    let caption = `⚡️ <b>#فوری | ${escapeHtml(title)}</b>\n\n`;
+    caption += `📌 منبع: <b>IGN</b>\n`;
+    if (timeStr) {
+        caption += `🗓 انتشار: ${escapeHtml(timeStr)}\n`;
     }
+    caption += `\n🎮 ${CHANNEL_USERNAME}`;
 
-    let caption = `📢 <b>${escapeHtml(title)}</b>\n\n`;
-    if (author) {
-        caption += `✍️ نویسنده: ${escapeHtml(author)}\n`;
-    }
-    caption += `🌐 منبع: <b>${escapeHtml(sourceTitle)}</b>\n`;
-    if (link) {
-        caption += `🔗 <a href="${escapeHtml(link)}">مشاهده لینک منبع</a>`;
-    }
-
-    // ارسال کاور خبر (تصویر یا پیام متنی تیتر)
-    if (imageUrl) {
-        try {
+    try {
+        if (imageUrl) {
+            console.log(`در حال ارسال تصویر: ${imageUrl}`);
             await bot.sendPhoto(CHANNEL_ID, imageUrl, {
-                caption,
+                caption: caption,
                 parse_mode: 'HTML'
             });
-            console.log(`✓ تصویر و تیتر ارسال شد: ${title}`);
-        } catch (err) {
-            console.error(`خطا در ارسال عکس: ${err.message}. ارسال متنی...`);
-            await bot.sendMessage(CHANNEL_ID, caption, { parse_mode: 'HTML' });
+            console.log(`✓ تصویر با کپشن ارسال شد: ${title}`);
+        } else {
+            await bot.sendMessage(CHANNEL_ID, caption, {
+                parse_mode: 'HTML',
+                disable_web_page_preview: true
+            });
+            console.log(`✓ پیام متنی ارسال شد: ${title}`);
         }
-    } else {
-        await bot.sendMessage(CHANNEL_ID, caption, { parse_mode: 'HTML' });
-    }
-
-    await sleep(SEND_DELAY);
-
-    // ارسال متن کامل مقاله به صورت پیام‌های تفکیک‌شده
-    if (fullText) {
-        const textParts = splitMessage(fullText);
-        console.log(`تعداد پیام‌های متن خبر: ${textParts.length}`);
-
-        for (const part of textParts) {
-            try {
-                await bot.sendMessage(CHANNEL_ID, part, {
-                    disable_web_page_preview: true
-                });
-                await sleep(1500);
-            } catch (err) {
-                console.error(`خطا در ارسال بخشی از متن: ${err.message}`);
-            }
-        }
+        return true;
+    } catch (err) {
+        console.error(`خطا در ارسال: ${err.message}`);
+        return false;
     }
 }
 
@@ -226,7 +139,7 @@ async function sendPost(item, sourceTitle) {
 
 async function run() {
     console.log('\n======================================');
-    console.log('FULL ARTICLE MULTI-FEED BOT RUNNING');
+    console.log('NEWS BOT RUNNING (PHOTO + FORMATTED CAPTION)');
     console.log('======================================');
 
     const sentItems = loadDatabase();
@@ -250,8 +163,6 @@ async function run() {
             }
 
             const data = await res.json();
-            const sourceTitle = data.title || 'News Feed';
-
             const items = (data.items || []).slice(0, MAX_POSTS_PER_FEED).reverse();
 
             for (const item of items) {
@@ -259,10 +170,10 @@ async function run() {
                 if (!guid || sentItems.includes(guid)) continue;
 
                 console.log(`\nخبر جدید: ${item.title}`);
-                await sendPost(item, sourceTitle);
+                const sent = await sendPost(item);
 
                 sentItems.push(guid);
-                newSentCount++;
+                if (sent) newSentCount++;
 
                 await sleep(SEND_DELAY);
             }
@@ -274,7 +185,7 @@ async function run() {
     saveDatabase(sentItems);
 
     console.log('\n======================================');
-    console.log(`BOT FINISHED | کل پست‌های جدید ارسال‌شده: ${newSentCount}`);
+    console.log(`BOT FINISHED | پست‌های جدید ارسال‌شده: ${newSentCount}`);
     console.log('======================================\n');
 }
 
